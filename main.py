@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker, Session
 import datetime
 from passlib.context import CryptContext
 import re
+import jwt
 
 DATABASE_URL = "sqlite:///./test.db"
 
@@ -25,18 +26,19 @@ app = FastAPI()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def verify_email(email):
-    return re.match(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', email)
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
-@app.post("/register")
-def register(email: str, password: str, db: Session = Depends(SessionLocal)):
-    if not verify_email(email):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid email format")
-    if db.query(User).filter(User.email == email).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
-    hashed_password = pwd_context.hash(password)
-    new_user = User(email=email, password=hashed_password)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return {"id": new_user.id, "email": new_user.email}
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    access_token = jwt.encode(to_encode, "secret", algorithm="HS256")
+    return access_token
+
+@app.post("/login")
+async def login(email: str, password: str):
+    db: Session = SessionLocal()
+    user = db.query(User).filter(User.email == email).first()
+    if not user or not verify_password(password, user.password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
