@@ -18,18 +18,12 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
-    password = Column(String)
-    role = Column(String)
+    email = Column(String, unique=True, index=True)
+    full_name = Column(String)
+    hashed_password = Column(String)
+    is_active = Column(Boolean, default=True)
 
 Base.metadata.create_all(bind=engine)
-
-class UserCreate:
-    username: str
-    password: str
-    role: str = "user"
-
-class UserInDB(UserCreate):
-    id: int
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -39,36 +33,27 @@ def verify_password(plain_password, hashed_password):
 def get_password_hash(password):
     return pwd_context.hash(password)
 
-SECRET_KEY = "your_secret_key"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
-REFRESH_TOKEN_EXPIRE_DAYS = 7
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def create_access_token(data: dict, expires_delta: datetime.timedelta = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode["exp"] = expire
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def create_refresh_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.datetime.utcnow() + datetime.timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode["exp"] = expire
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-app = FastAPI()
-
-@app.post("/token/")
-async def login(user: UserCreate):
-    db: Session = SessionLocal()
-    db_user = db.query(User).filter(User.username == user.username).first()
-    if not db_user or not verify_password(user.password, db_user.password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Incorrect username or password",
-                            headers={"WWW-Authenticate": "Bearer"})
-    access_token = create_access_token(data={"sub": db_user.username, "role": db_user.role})
-    refresh_token = create_refresh_token(data={"sub": db_user.username, "role": db_user.role})
-    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, "SECRET_KEY", algorithms=["HS256"])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        user = db.query(User).filter(User.username == username).first()
+        if user is None:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+    return user
