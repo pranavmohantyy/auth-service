@@ -1,1 +1,49 @@
-from fastapi import FastAPI, Depends, HTTPException, status\nfrom sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime\nfrom sqlalchemy.ext.declarative import declarative_base\nfrom sqlalchemy.orm import sessionmaker, Session\nimport datetime\nfrom passlib.context import CryptContext\nimport re\nimport jwt\n\nDATABASE_URL = "sqlite:///./test.db"\n\nengine = create_engine(DATABASE_URL)\nSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)\nBase = declarative_base()\n\nclass User(Base):\n    __tablename__ = "users"\n\n    id = Column(Integer, primary_key=True, index=True)\n    username = Column(String, unique=True, index=True)\n    email = Column(String, unique=True, index=True)\n    full_name = Column(String)\n    hashed_password = Column(String)\n    is_active = Column(Boolean, default=True)\n\nBase.metadata.create_all(bind=engine)\n\napp = FastAPI()\n\n\ndef get_db():\n    db = SessionLocal()\n    try:\n        yield db\n    finally:\n        db.close()\n\n\n@app.get("/me")\nasync def read_users_me(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):\n    credentials_exception = HTTPException(\n        status_code=status.HTTP_401_UNAUTHORIZED,\n        detail="Could not validate credentials",\n        headers={"WWW-Authenticate": "Bearer"},\n    )\n    # Decoding JWT token and getting user info\n    try:\n        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])\n        user = db.query(User).filter(User.id == payload.get("sub")).first()\n    except JWTError:\n        raise credentials_exception\n    if user is None:\n        raise credentials_exception\n    return {\n        "id": user.id,\n        "username": user.username,\n        "email": user.email,\n        "full_name": user.full_name\n    }\n
+from fastapi import FastAPI, Depends, HTTPException, status
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+import datetime
+from passlib.context import CryptContext
+import re
+import jwt
+
+DATABASE_URL = "sqlite:///./test.db"
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    is_active = Column(Boolean, default=True)
+
+Base.metadata.create_all(bind=engine)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+app = FastAPI()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@app.patch("/me")
+def update_user(email: str = None, password: str = None, current_password: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == email).first() if email else None
+    if user and not pwd_context.verify(current_password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+    if email:
+        user.email = email
+    if password:
+        user.hashed_password = pwd_context.hash(password)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"email": user.email} if email else {"message": "password updated"}
