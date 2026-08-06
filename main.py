@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -6,6 +6,7 @@ import datetime
 from passlib.context import CryptContext
 import re
 import jwt
+import smtplib
 
 DATABASE_URL = "sqlite:///./test.db"
 
@@ -20,60 +21,41 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     is_active = Column(Boolean, default=True)
+    reset_token = Column(String, nullable=True)
 
 Base.metadata.create_all(bind=engine)
-
-class Token:
-    access_token: str
-    token_type: str
-
-class TokenData:
-    email: str | None = None
 
 app = FastAPI()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-def create_access_token(data: dict, expires_delta: datetime.timedelta | None = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
-    to_encode["exp"] = expire
-    token = jwt.encode(to_encode, "secret", algorithm="HS256")
-    return token
-
-@app.post("/register/")
-async def register(email: str, password: str):
-    db: Session = SessionLocal()
-    hashed_password = get_password_hash(password)
-    db_user = User(email=email, hashed_password=hashed_password)
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-@app.post("/login/")
-async def login(email: str, password: str):
-    db: Session = SessionLocal()
+@app.post("/request-reset/")
+async def request_reset(email: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == email).first()
-    if not user or not verify_password(password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
-    access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    if user:
+        token = jwt.encode({"sub": user.email, "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)}, "secret")
+        user.reset_token = token
+        db.commit()
+        # send email with token (placeholder)
+        print(f"Send email to {email} with token {token}")
+    return {"msg": "If an account with that email exists, a reset link has been sent."}
 
-@app.post("/verify-email/")
-async def verify_email(email: str, background_tasks: BackgroundTasks):
-    token = create_access_token(data={"sub": email}, expires_delta=datetime.timedelta(minutes=10))
-    background_tasks.add_task(fake_send_email, email, token)
-    return {"msg": "Verification email sent"}
-
-def fake_send_email(email: str, token: str):
-    print(f"Sending verification email to {email} with token {token}")
+@app.post("/reset-password/")
+async def reset_password(token: str, new_password: str, db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, "secret", algorithms=["HS256"])
+        user = db.query(User).filter(User.email == payload["sub"]).first()
+        if user and user.reset_token == token:
+            user.hashed_password = pwd_context.hash(new_password)
+            user.reset_token = None
+            db.commit()
+            return {"msg": "Password has been reset."}
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token")
