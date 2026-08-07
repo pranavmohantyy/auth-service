@@ -18,16 +18,15 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
-    is_active = Column(Boolean, default=True)
-    reset_token = Column(String, nullable=True)
+    username = Column(String, unique=True, index=True)
+    password = Column(String)
+    is_locked = Column(Boolean, default=False)
+    failed_attempts = Column(Integer, default=0)
+    lock_until = Column(DateTime, nullable=True)
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def get_db():
     db = SessionLocal()
@@ -36,26 +35,26 @@ def get_db():
     finally:
         db.close()
 
-@app.post("/request-reset/")
-async def request_reset(email: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == email).first()
+@app.post("/login/")
+async def login(username: str, password: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
     if user:
-        token = jwt.encode({"sub": user.email, "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=15)}, "secret")
-        user.reset_token = token
-        db.commit()
-        # send email with token (placeholder)
-        print(f"Send email to {email} with token {token}")
-    return {"msg": "If an account with that email exists, a reset link has been sent."}
-
-@app.post("/reset-password/")
-async def reset_password(token: str, new_password: str, db: Session = Depends(get_db)):
-    try:
-        payload = jwt.decode(token, "secret", algorithms=["HS256"])
-        user = db.query(User).filter(User.email == payload["sub"]).first()
-        if user and user.reset_token == token:
-            user.hashed_password = pwd_context.hash(new_password)
-            user.reset_token = None
+        if user.is_locked:
+            if user.lock_until and user.lock_until > datetime.datetime.now():
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is locked. Try again later.")
+            user.is_locked = False
+            user.failed_attempts = 0
+        if not verify_password(password, user.password):
+            user.failed_attempts += 1
+            if user.failed_attempts >= 5:
+                user.is_locked = True
+                user.lock_until = datetime.datetime.now() + datetime.timedelta(minutes=15)
             db.commit()
-            return {"msg": "Password has been reset."}
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid token")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        user.failed_attempts = 0
+        db.commit()
+        return {"access_token": "some_token", "token_type": "bearer"}
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+def verify_password(plain_password, hashed_password):
+    return CryptContext(schemes=["bcrypt"]).verify(plain_password, hashed_password)
